@@ -21,6 +21,7 @@ use crate::vmm_config::instance_info::InstanceInfo;
 use crate::vmm_config::logger::{LoggerConfig, LoggerConfigError};
 use crate::vmm_config::machine_config::{VmConfig, VmConfigError};
 use crate::vmm_config::metrics::{MetricsConfig, MetricsConfigError};
+use crate::vmm_config::migration::{AcceptMigrationParams, StartMigrationParams};
 use crate::vmm_config::mmds::{MmdsConfig, MmdsConfigError};
 use crate::vmm_config::net::{
     NetworkInterfaceConfig, NetworkInterfaceError, NetworkInterfaceUpdateConfig,
@@ -51,6 +52,12 @@ pub enum VmmAction {
     /// after the microVM has booted and only when the microVM is in `Paused` state.
     #[cfg(target_arch = "x86_64")]
     CreateSnapshot(CreateSnapshotParams),
+    /// Accept VM migration.
+    #[cfg(target_arch = "x86_64")]
+    AcceptMigration(AcceptMigrationParams),
+    /// Accept VM migration.
+    #[cfg(target_arch = "x86_64")]
+    StartMigration(StartMigrationParams),
     /// Get the configuration of the microVM.
     GetVmConfiguration,
     /// Flush the metrics. This action can only be called after the logger has been configured.
@@ -280,6 +287,10 @@ impl<'a> PrebootApiController<'a> {
             LoadSnapshot(snapshot_load_cfg) => self
                 .load_snapshot(&snapshot_load_cfg)
                 .map(|_| VmmData::Empty),
+            #[cfg(target_arch = "x86_64")]
+            AcceptMigration(accept_migration_cfg) => self
+                .accept_migration(&accept_migration_cfg)
+                .map(|_| VmmData::Empty),
             SetVsockDevice(vsock_cfg) => self
                 .vm_resources
                 .set_vsock_device(vsock_cfg)
@@ -312,8 +323,18 @@ impl<'a> PrebootApiController<'a> {
             | UpdateBlockDevicePath(_, _)
             | UpdateNetworkInterface(_) => Err(VmmActionError::OperationNotSupportedPreBoot),
             #[cfg(target_arch = "x86_64")]
-            CreateSnapshot(_) | SendCtrlAltDel => Err(VmmActionError::OperationNotSupportedPreBoot),
+            CreateSnapshot(_) | StartMigration(_) | SendCtrlAltDel => {
+                Err(VmmActionError::OperationNotSupportedPreBoot)
+            }
         }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn accept_migration(
+        &mut self,
+        _accept_migration_params: &AcceptMigrationParams,
+    ) -> ActionResult {
+        Ok(())
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -359,6 +380,10 @@ impl RuntimeApiController {
             CreateSnapshot(snapshot_create_cfg) => self
                 .create_snapshot(&snapshot_create_cfg)
                 .map(|_| VmmData::Empty),
+            #[cfg(target_arch = "x86_64")]
+            StartMigration(start_migration_cfg) => self
+                .start_migration(&start_migration_cfg)
+                .map(|_| VmmData::Empty),
             FlushMetrics => self.flush_metrics().map(|_| VmmData::Empty),
             GetVmConfiguration => Ok(VmmData::MachineConfiguration(self.vm_config.clone())),
             Pause => self.pause().map(|_| VmmData::Empty),
@@ -383,7 +408,9 @@ impl RuntimeApiController {
             | SetMmdsConfiguration(_)
             | SetVmConfiguration(_) => Err(VmmActionError::OperationNotSupportedPostBoot),
             #[cfg(target_arch = "x86_64")]
-            LoadSnapshot(_) => Err(VmmActionError::OperationNotSupportedPostBoot),
+            LoadSnapshot(_) | AcceptMigration(_) => {
+                Err(VmmActionError::OperationNotSupportedPostBoot)
+            }
             StartMicroVm => Err(VmmActionError::StartMicrovm(
                 StartMicrovmError::MicroVMAlreadyRunning,
             )),
@@ -450,6 +477,11 @@ impl RuntimeApiController {
             .expect("Poisoned lock")
             .send_ctrl_alt_del()
             .map_err(VmmActionError::InternalVmm)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn start_migration(&mut self, _start_migration_params: &StartMigrationParams) -> ActionResult {
+        Ok(())
     }
 
     #[cfg(target_arch = "x86_64")]
