@@ -23,6 +23,7 @@ use rate_limiter::{BucketUpdate, RateLimiter, TokenType};
 #[cfg(not(test))]
 use std::io;
 use std::io::{Read, Write};
+use std::os::unix::io::AsRawFd;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -35,6 +36,7 @@ use virtio_gen::virtio_net::{
     VIRTIO_NET_F_MAC,
 };
 use vm_memory::{ByteValued, Bytes, GuestAddress, GuestMemoryError, GuestMemoryMmap};
+use std::borrow::BorrowMut;
 
 enum FrontendError {
     AddUsed,
@@ -90,10 +92,20 @@ impl Default for ConfigSpace {
 
 unsafe impl ByteValued for ConfigSpace {}
 
+pub trait Backend: 'static + Read + Write + AsRawFd + Send {
+    fn if_name_as_string(&self) -> String;
+}
+
+impl Backend for Tap {
+    fn if_name_as_string(&self) -> String {
+        self.if_name_as_str().to_string()
+    }
+}
+
 pub struct Net {
     pub(crate) id: String,
 
-    pub(crate) tap: Tap,
+    pub(crate) tap: Box<dyn Backend>,
 
     pub(crate) avail_features: u64,
     pub(crate) acked_features: u64,
@@ -144,7 +156,7 @@ impl Net {
         tap.set_offload(
             net_gen::TUN_F_CSUM | net_gen::TUN_F_UFO | net_gen::TUN_F_TSO4 | net_gen::TUN_F_TSO6,
         )
-        .map_err(Error::TapSetOffload)?;
+            .map_err(Error::TapSetOffload)?;
 
         let vnet_hdr_size = vnet_hdr_len() as i32;
         tap.set_vnet_hdr_size(vnet_hdr_size)
@@ -180,7 +192,7 @@ impl Net {
         };
         Ok(Net {
             id,
-            tap,
+            tap: Box::new(tap),
             avail_features,
             acked_features: 0u64,
             queues,
@@ -376,7 +388,7 @@ impl Net {
         mmds_ns: Option<&mut MmdsNetworkStack>,
         rate_limiter: &mut RateLimiter,
         frame_buf: &[u8],
-        tap: &mut Tap,
+        tap: &mut dyn Backend,
         guest_mac: Option<MacAddr>,
     ) -> Result<bool> {
         let checked_frame = |frame_buf| {
@@ -587,7 +599,7 @@ impl Net {
                 self.mmds_ns.as_mut(),
                 &mut self.tx_rate_limiter,
                 &self.tx_frame_buf[..read_count],
-                &mut self.tap,
+                self.tap.borrow_mut(),
                 self.guest_mac,
             )
             .unwrap_or_else(|_| false);
@@ -1191,7 +1203,7 @@ pub mod tests {
     fn test_tx_missing_queue_signal() {
         let mut th = TestHelper::default();
         th.activate_net();
-        let tap_traffic_simulator = TapTrafficSimulator::new(if_index(&th.net().tap));
+        let tap_traffic_simulator = TapTrafficSimulator::new(if_index(th.net().tap.as_ref()));
 
         th.add_desc_chain(NetQueue::Tx, 0, &[(0, 4096, 0)]);
         th.net().queue_evts[TX_INDEX].read().unwrap();
@@ -1211,7 +1223,7 @@ pub mod tests {
     fn test_tx_writeable_descriptor() {
         let mut th = TestHelper::default();
         th.activate_net();
-        let tap_traffic_simulator = TapTrafficSimulator::new(if_index(&th.net().tap));
+        let tap_traffic_simulator = TapTrafficSimulator::new(if_index(th.net().tap.as_ref()));
 
         let desc_list = [(0, 100, 0), (1, 100, VIRTQ_DESC_F_WRITE), (2, 500, 0)];
         th.add_desc_chain(NetQueue::Tx, 0, &desc_list);
@@ -1230,7 +1242,7 @@ pub mod tests {
     fn test_tx_short_frame() {
         let mut th = TestHelper::default();
         th.activate_net();
-        let tap_traffic_simulator = TapTrafficSimulator::new(if_index(&th.net().tap));
+        let tap_traffic_simulator = TapTrafficSimulator::new(if_index(th.net().tap.as_ref()));
 
         // Send an invalid frame (too small, VNET header missing).
         th.add_desc_chain(NetQueue::Tx, 0, &[(0, 1, 0)]);
@@ -1252,7 +1264,7 @@ pub mod tests {
     fn test_tx_partial_read() {
         let mut th = TestHelper::default();
         th.activate_net();
-        let tap_traffic_simulator = TapTrafficSimulator::new(if_index(&th.net().tap));
+        let tap_traffic_simulator = TapTrafficSimulator::new(if_index(th.net().tap.as_ref()));
 
         // The descriptor chain is created so that the last descriptor doesn't fit in the
         // guest memory.
@@ -1280,7 +1292,7 @@ pub mod tests {
     fn test_tx_retry() {
         let mut th = TestHelper::default();
         th.activate_net();
-        let tap_traffic_simulator = TapTrafficSimulator::new(if_index(&th.net().tap));
+        let tap_traffic_simulator = TapTrafficSimulator::new(if_index(th.net().tap.as_ref()));
 
         // Add invalid descriptor chain - writeable descriptor.
         th.add_desc_chain(
@@ -1320,7 +1332,7 @@ pub mod tests {
     fn test_tx_complex_descriptor() {
         let mut th = TestHelper::default();
         th.activate_net();
-        let tap_traffic_simulator = TapTrafficSimulator::new(if_index(&th.net().tap));
+        let tap_traffic_simulator = TapTrafficSimulator::new(if_index(th.net().tap.as_ref()));
 
         // Add gaps between the descriptor ids in order to ensure that we follow
         // the `next` field.
@@ -1348,7 +1360,7 @@ pub mod tests {
     fn test_tx_multiple_frame() {
         let mut th = TestHelper::default();
         th.activate_net();
-        let tap_traffic_simulator = TapTrafficSimulator::new(if_index(&th.net().tap));
+        let tap_traffic_simulator = TapTrafficSimulator::new(if_index(th.net().tap.as_ref()));
 
         // Write the first frame to the Tx queue
         let desc_list = [(0, 50, 0), (1, 100, 0), (2, 150, 0)];
@@ -1432,7 +1444,7 @@ pub mod tests {
                 net.mmds_ns.as_mut(),
                 &mut net.tx_rate_limiter,
                 &frame_buf[..frame_len],
-                &mut net.tap,
+                net.tap.as_mut(),
                 Some(src_mac),
             )
             .unwrap())
@@ -1466,7 +1478,7 @@ pub mod tests {
                 net.mmds_ns.as_mut(),
                 &mut net.tx_rate_limiter,
                 &frame_buf[..frame_len],
-                &mut net.tap,
+                net.tap.as_mut(),
                 Some(guest_mac),
             )
         );
@@ -1479,7 +1491,7 @@ pub mod tests {
                 net.mmds_ns.as_mut(),
                 &mut net.tx_rate_limiter,
                 &frame_buf[..frame_len],
-                &mut net.tap,
+                net.tap.as_mut(),
                 Some(not_guest_mac),
             )
         );

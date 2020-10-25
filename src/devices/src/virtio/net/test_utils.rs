@@ -11,7 +11,7 @@ use std::{mem, result};
 
 #[cfg(test)]
 use crate::virtio::net::device::vnet_hdr_len;
-use crate::virtio::net::tap::{Error, IfReqBuilder, Tap};
+use crate::virtio::net::tap::{Error, IfReqBuilder};
 use crate::virtio::test_utils::VirtQueue;
 use crate::virtio::{Net, Queue, QueueError};
 
@@ -21,6 +21,7 @@ use vm_memory::{GuestAddress, GuestMemoryMmap};
 use utils::net::mac::MacAddr;
 
 use crate::Error as DeviceError;
+use crate::virtio::net::device::Backend;
 
 pub type Result<T> = ::std::result::Result<T, Error>;
 
@@ -41,7 +42,7 @@ pub fn default_net() -> Net {
         true,
     )
     .unwrap();
-    enable(&net.tap);
+    enable(net.tap.as_ref());
 
     net
 }
@@ -198,10 +199,10 @@ pub fn virtqueues(mem: &GuestMemoryMmap) -> (VirtQueue, VirtQueue) {
     (rxq, txq)
 }
 
-pub fn if_index(tap: &Tap) -> i32 {
+pub fn if_index(tap: &dyn Backend) -> i32 {
     let sock = create_socket();
     let ifreq = IfReqBuilder::new()
-        .if_name(&tap.if_name)
+        .if_name_string(&tap.if_name_as_string()).unwrap()
         .execute(&sock, c_ulong::from(net_gen::sockios::SIOCGIFINDEX))
         .unwrap();
 
@@ -209,20 +210,22 @@ pub fn if_index(tap: &Tap) -> i32 {
 }
 
 /// Enable the tap interface.
-pub fn enable(tap: &Tap) {
+pub fn enable(tap: &dyn Backend) {
+    let if_name = tap.if_name_as_string();
+
     // Disable IPv6 router advertisment requests
     Command::new("sh")
         .arg("-c")
         .arg(format!(
             "echo 0 > /proc/sys/net/ipv6/conf/{}/accept_ra",
-            tap.if_name_as_str()
+            if_name,
         ))
         .output()
         .unwrap();
 
     let sock = create_socket();
     IfReqBuilder::new()
-        .if_name(&tap.if_name)
+        .if_name_string(&if_name).unwrap()
         .flags(
             (net_gen::net_device_flags_IFF_UP
                 | net_gen::net_device_flags_IFF_RUNNING
@@ -242,7 +245,7 @@ pub fn check_used_queue_signal(net: &Net, count: u64) {
 #[cfg(test)]
 pub(crate) fn inject_tap_tx_frame(net: &Net, len: usize) -> Vec<u8> {
     assert!(len >= vnet_hdr_len());
-    let tap_traffic_simulator = TapTrafficSimulator::new(if_index(&net.tap));
+    let tap_traffic_simulator = TapTrafficSimulator::new(if_index(net.tap.as_ref()));
     let mut frame = utils::rand::rand_alphanumerics(len - vnet_hdr_len())
         .as_bytes()
         .to_vec();

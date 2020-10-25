@@ -72,6 +72,11 @@ impl IfReqBuilder {
         Self(Default::default())
     }
 
+    pub fn if_name_string(self, if_name: &str) -> Result<Self> {
+        build_terminated_if_name(if_name)
+            .map(|ref x| self.if_name(x))
+    }
+
     pub fn if_name(mut self, if_name: &[u8; IFACE_NAME_MAX_LEN]) -> Self {
         // Since we don't call as_mut on the same union field more than once, this block is safe.
         let ifrn_name = unsafe { self.0.ifr_ifrn.ifrn_name.as_mut() };
