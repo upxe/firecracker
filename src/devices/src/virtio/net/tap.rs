@@ -45,7 +45,7 @@ ioctl_iow_nr!(TUNSETVNETHDRSZ, TUNTAP, 216, ::std::os::raw::c_int);
 #[derive(Debug)]
 pub struct Tap {
     tap_file: File,
-    pub(crate) if_name: [u8; IFACE_NAME_MAX_LEN],
+    if_name: [u8; IFACE_NAME_MAX_LEN],
 }
 
 // Returns a byte vector representing the contents of a null terminated C string which
@@ -77,7 +77,7 @@ impl IfReqBuilder {
             .map(|ref x| self.if_name(x))
     }
 
-    pub fn if_name(mut self, if_name: &[u8; IFACE_NAME_MAX_LEN]) -> Self {
+    fn if_name(mut self, if_name: &[u8; IFACE_NAME_MAX_LEN]) -> Self {
         // Since we don't call as_mut on the same union field more than once, this block is safe.
         let ifrn_name = unsafe { self.0.ifr_ifrn.ifrn_name.as_mut() };
         ifrn_name.copy_from_slice(if_name.as_ref());

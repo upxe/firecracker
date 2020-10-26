@@ -20,10 +20,11 @@ use libc::EAGAIN;
 use logger::{error, warn, Metric, METRICS};
 use mmds::ns::MmdsNetworkStack;
 use rate_limiter::{BucketUpdate, RateLimiter, TokenType};
+use std::fs::File;
 #[cfg(not(test))]
 use std::io;
 use std::io::{Read, Write};
-use std::os::unix::io::AsRawFd;
+use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -102,6 +103,12 @@ impl Backend for Tap {
     }
 }
 
+impl Backend for File {
+    fn if_name_as_string(&self) -> String {
+        format!("fd{}", self.as_raw_fd())
+    }
+}
+
 pub struct Net {
     pub(crate) id: String,
 
@@ -141,6 +148,73 @@ pub struct Net {
 }
 
 impl Net {
+    /// Create a new virtio network device backed by the given file descriptor.
+    pub fn new_with_fd(
+        id: String,
+        fd: RawFd,
+        guest_mac: Option<&MacAddr>,
+        rx_rate_limiter: RateLimiter,
+        tx_rate_limiter: RateLimiter,
+        allow_mmds_requests: bool,
+    ) -> Result<Self> {
+        // Safe iff the user has provided a valid file descriptor.
+        let file = unsafe { File::from_raw_fd(fd) };
+
+        // We don't implement any offloads.
+        // TODO: we might; depends on where the FD ends up.
+        let mut avail_features = 1 << VIRTIO_NET_F_GUEST_CSUM
+            | 1 << VIRTIO_NET_F_GUEST_TSO4
+            | 1 << VIRTIO_NET_F_GUEST_UFO
+            | 1 << VIRTIO_F_VERSION_1;
+
+        let mut config_space = ConfigSpace::default();
+        if let Some(mac) = guest_mac {
+            config_space.guest_mac.copy_from_slice(mac.get_bytes());
+            // When this feature isn't available, the driver generates a random MAC address.
+            // Otherwise, it should attempt to read the device MAC address from the config space.
+            avail_features |= 1 << VIRTIO_NET_F_MAC;
+        }
+
+        let mut queue_evts = Vec::new();
+        for _ in QUEUE_SIZES.iter() {
+            queue_evts.push(EventFd::new(libc::EFD_NONBLOCK).map_err(Error::EventFd)?);
+        }
+
+        let queues = QUEUE_SIZES.iter().map(|&s| Queue::new(s)).collect();
+
+        let mmds_ns = if allow_mmds_requests {
+            Some(MmdsNetworkStack::new_with_defaults(None))
+        } else {
+            None
+        };
+        Ok(Net {
+            id,
+            tap: Box::new(file),
+            avail_features,
+            acked_features: 0u64,
+            queues,
+            queue_evts,
+            rx_rate_limiter,
+            tx_rate_limiter,
+            rx_deferred_frame: false,
+            rx_deferred_irqs: false,
+            rx_bytes_read: 0,
+            rx_frame_buf: [0u8; MAX_BUFFER_SIZE],
+            tx_frame_buf: [0u8; MAX_BUFFER_SIZE],
+            tx_iovec: Vec::with_capacity(QUEUE_SIZE as usize),
+            interrupt_status: Arc::new(AtomicUsize::new(0)),
+            interrupt_evt: EventFd::new(libc::EFD_NONBLOCK).map_err(Error::EventFd)?,
+            device_state: DeviceState::Inactive,
+            activate_evt: EventFd::new(libc::EFD_NONBLOCK).map_err(Error::EventFd)?,
+            config_space,
+            mmds_ns,
+            guest_mac: guest_mac.copied(),
+
+            #[cfg(test)]
+            mocks: Mocks::default(),
+        })
+    }
+
     /// Create a new virtio network device with the given TAP interface.
     pub fn new_with_tap(
         id: String,
